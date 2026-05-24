@@ -214,59 +214,32 @@ class AppleMusicAuthEndpoint {
     })
   }
 
-  /// Primary flow (called by Spotube on every platform).
-  ///
-  /// Opens Apple's web player in a webview and harvests the `media-user-token`
-  /// cookie automatically — no token pasting, same idea as the Spotify plugin.
-  ///
-  /// Apple's sign-in frequently completes inside an iframe without a top-level
-  /// navigation, so reacting to page loads alone can miss the moment the token
-  /// appears. We therefore do both: listen to page loads AND poll the cookie
-  /// jar on a short timer; whichever spots the token first wins. `getCookies`
-  /// reads the native cookie store (incl. HttpOnly), so this works even though
-  /// `media-user-token` isn't visible to page JS.
+  /// Primary flow (called by Spotube). Mirrors the Spotify plugin exactly:
+  /// open the web player in a webview and harvest the `media-user-token`
+  /// cookie on each page load. `getCookies` reads the native cookie store, so
+  /// it picks up HttpOnly cookies too. Kept deliberately minimal — extra
+  /// machinery (timers, etc.) before `open()` risks the webview never opening.
   fun authenticate() -> Future {
     var webview = Webview(uri: "https://music.apple.com/login")
     var done = false
-    var pollTimer: Timer
-    var attempts = 0
 
-    // Sign in + tear down the moment the token shows up in the cookie jar.
-    var tryFinish = (cookies) {
-      if (done) return
-      var jsonCookies = cookies.map((cookie) => cookie.toJson()).toList()
-      var match = jsonCookies.where((c) => c["name"] == "media-user-token").toList()
-      if (match.isEmpty) return
-      var token = match.first["value"]
-      if (token == null || token == "") return
-
-      done = true
-      pollTimer?.cancel()
-      return login(token).then(() {
-        return webview.close()
-      })
-    }
-
-    // 1) Page-load signal — covers same-window redirect logins.
     var sub: StreamSubscription = webview.onUrlRequestStream.listen((url) {
       if (done) return
       if (!url.contains("music.apple.com")) return
-      return webview.getCookies(url).then(tryFinish)
-    })
 
-    // 2) Cookie-jar poll — covers iframe/popup logins that never navigate the
-    //    top frame. Gives up after ~5 min so an abandoned login doesn't leak.
-    pollTimer = Timer.periodic(Duration(seconds: 2), (cancel) {
-      if (done) {
-        pollTimer?.cancel()
-        return
-      }
-      attempts = attempts + 1
-      if (attempts > 150) {
-        pollTimer?.cancel()
-        return
-      }
-      webview.getCookies("https://music.apple.com/").then(tryFinish)
+      return webview.getCookies(url).then((cookies) {
+        var jsonCookies = cookies.map((cookie) => cookie.toJson()).toList()
+        var match = jsonCookies.where((c) => c["name"] == "media-user-token").toList()
+
+        if (match.isEmpty) return
+        var token = match.first["value"]
+        if (token == null || token == "") return
+
+        done = true
+        return login(token).then(() {
+          return webview.close()
+        })
+      })
     })
 
     return webview.open()
