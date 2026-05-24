@@ -14,6 +14,7 @@ var JSON = std.JSON
 var Regex = std.Regex
 var LocalStorage = spotube.LocalStorage
 var Webview = spotube.Webview
+var SpotubeForm = spotube.SpotubeForm
 
 /// How long a scraped developer token is trusted before it is re-scraped.
 /// (The JWT itself lasts months; the periodic re-scrape just keeps it fresh
@@ -214,9 +215,69 @@ class AppleMusicAuthEndpoint {
     })
   }
 
-  /// Primary flow: sign in through Apple's web player and harvest the
-  /// `media-user-token` cookie.
+  /// Primary flow (called by Spotube on every platform).
+  ///
+  /// We collect the `media-user-token` through a Spotube form rather than a
+  /// webview. Spotube's in-app webview (`flutter_inappwebview`) has no
+  /// new-window / popup support, which Apple's ID sign-in relies on, so the
+  /// webview flow never completes on mobile (and doesn't even open on iOS).
+  /// Forms work on every platform, and once we have the user token we scrape
+  /// the developer token and resolve the storefront ourselves — so the user
+  /// only has to paste a single value.
   fun authenticate() -> Future {
+    return SpotubeForm.show("Apple Music Login", [
+      {
+        objectType: "text",
+        text: "## Connect your Apple Music account\n\nPaste your **Media-User-Token** below — the plugin fetches the developer token and storefront for you.\n\n**How to get the token:**\n1. Sign in at [music.apple.com](https://music.apple.com) in a web browser.\n2. Open the browser dev tools → Application/Storage → Cookies → `https://music.apple.com`, and copy the value of the **`media-user-token`** cookie.\n\nOn a phone, grab it from a desktop browser (mobile Safari has no cookie inspector) or from the **Cider** app (`GET /api/v2/client/tokens`). The developer token below is optional — leave it blank to auto-detect.",
+      }.toJson(),
+      {
+        objectType: "input",
+        id: "mediaUserToken",
+        variant: "password",
+        placeholder: "media-user-token",
+        required: true,
+      }.toJson(),
+      {
+        objectType: "input",
+        id: "developerToken",
+        variant: "password",
+        placeholder: "developer token (optional)",
+        required: false,
+      }.toJson(),
+    ]).then((result) {
+      var values = _normalizeFormResult(result)
+      var mediaUserToken = values["mediaUserToken"]
+      if (mediaUserToken == null || mediaUserToken == "") {
+        throw "A Media-User-Token is required to sign in."
+      }
+      var devToken = values["developerToken"]
+      if (devToken == "") devToken = null
+      return login(mediaUserToken, developerToken: devToken)
+    })
+  }
+
+  /// Accept either a `{ id: value }` map or a `[{ id, value }]` list from the
+  /// host form implementation. (Spotube returns the list form.)
+  fun _normalizeFormResult(result) -> Map {
+    if (result == null) return {}.toJson()
+    if (result is List) {
+      var map = {}.toJson()
+      for (var field in result) {
+        if (field != null && field["id"] != null) {
+          map[field["id"]] = field["value"]
+        }
+      }
+      return map
+    }
+    return result
+  }
+
+  /// Webview sign-in: open Apple's web player and harvest the
+  /// `media-user-token` cookie. Works on desktop, where the host webview
+  /// supports the popup Apple ID sign-in uses. Not wired into Spotube's UI
+  /// (it only calls `authenticate()`); kept for desktop hosts that drive it
+  /// directly and for reference.
+  fun authenticateWithWebview() -> Future {
     var webview = Webview(uri: "https://music.apple.com/login")
     var done = false
 

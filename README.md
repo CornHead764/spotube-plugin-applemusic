@@ -26,9 +26,18 @@ scoped to).
 
 ### Authentication
 
-- **`auth.authenticate()`** opens music.apple.com in a webview, waits
-  for the `media-user-token` cookie after sign-in, scrapes the developer token,
-  resolves the storefront, and persists everything to local storage.
+- **`auth.authenticate()`** (the flow Spotube invokes) prompts for your
+  **Media-User-Token** via a form. From that single value the plugin scrapes the
+  shared developer token, resolves the storefront, and persists everything to
+  local storage. This works on every platform, including iOS.
+  - Get the token by signing in at music.apple.com in a browser and copying the
+    `media-user-token` cookie (dev tools → Application → Cookies), or from
+    Cider's `GET /api/v2/client/tokens`.
+- **`auth.authenticateWithWebview()`** is an alternative that signs in through
+  music.apple.com in a webview and harvests the cookie automatically. It works on
+  desktop hosts but **not on mobile** — Spotube's in-app webview lacks the
+  new-window/popup support Apple's ID sign-in requires (on iOS it doesn't open at
+  all), so it isn't wired into Spotube's login button.
 
 Credentials are cached in local storage and the developer token is re-scraped on
 a timer (default every 12 h) to self-heal against rotation.
@@ -87,4 +96,4 @@ endpoints are best-effort:
 
 Architecture and plugin contract from
 [`hetu_spotube_plugin`](https://github.com/KRTirtho/hetu_spotube_plugin) and the
-Spotify reference plugin by Sonic Liberation.
+Spotify reference plugin by CornHead764.

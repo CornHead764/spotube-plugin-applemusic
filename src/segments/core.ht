@@ -1,15 +1,5 @@
 import "module:std" as std
 
-const supportStr = 'Just use this plugin and I am good. No need for supporting me.
-
-**But support the artists.**
-
-Stop feeding megacorp with money. Directly donate to artists or buy their merch or go to their concerts.
-The 30% streaming service cut and other e.g. record labels cut is ridiculous.
-Artists (only ones directly involved in making the music) deserve 100% of the money you pay for their music.
-Not some greedy corporations and stupid middlemen.
-';
-
 var HttpClient = std.HttpClient
 var RequestOptions = std.RequestOptions
 
@@ -79,9 +69,10 @@ class CorePlugin {
   }
 
   /// Returns the support information for the plugin in Markdown or plain text.
-  /// Supports images and links.
+  /// Supports images and links. Intentionally empty so Spotube renders no
+  /// support section for this plugin.
   get support -> string {
-    return supportStr
+    return ""
   }
 }
 
