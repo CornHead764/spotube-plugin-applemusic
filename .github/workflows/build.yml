@@ -9,9 +9,9 @@ on:
     inputs:
       version:
         type: string
-        description: 'Version (x.x.x)'
-        required: true
-        default: 'continuous'
+        description: 'Version (x.x.x) — leave blank to use plugin.json'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -32,6 +32,14 @@ jobs:
       - name: Install dependencies
         run: dart pub global activate hetu_script_dev_tools
 
+      - name: Resolve version
+        id: ver
+        run: |
+          V="${{ github.event.inputs.version }}"
+          if [ -z "$V" ]; then V="$(jq -r .version plugin.json)"; fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Releasing version: $V"
+
       - name: Run build
         run: make
 
@@ -44,12 +52,11 @@ jobs:
         with:
           path: build/plugin.smplug
 
-      - name: Upload to release (${{ github.event.inputs.version || 'continuous' }})
+      - name: Upload to release (${{ steps.ver.outputs.version }})
         uses: ncipollo/release-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag: ${{ github.event.inputs.version || 'continuous' }}
-          prerelease: ${{ github.event_name == 'push' }}
+          tag: ${{ steps.ver.outputs.version }}
           omitBodyDuringUpdate: true
           omitNameDuringUpdate: true
           omitPrereleaseDuringUpdate: true
