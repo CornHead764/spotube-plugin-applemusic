@@ -58,9 +58,8 @@ class PlaylistEndpoint {
     return false
   }
 
-  fun save(playlistId: string) async {
-    await client.addToLibrary("playlists", [playlistId])
-    return true
+  fun save(playlistId: string) {
+    return client.addToLibrary("playlists", [playlistId]).then(() => true)
   }
 
   fun unsave(playlistId: string) {
