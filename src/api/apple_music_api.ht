@@ -1,0 +1,267 @@
+import "module:std" as std
+
+var HttpClient = std.HttpClient
+var RequestOptions = std.RequestOptions
+
+/// The Apple Music API host used by the web player. It accepts the same
+/// developer token / Music-User-Token pair that music.apple.com uses and,
+/// unlike `api.music.apple.com`, does not 403 web-origin developer tokens.
+const baseUrl = "https://amp-api.music.apple.com"
+
+/// Thin client over the Apple Music JSON API.
+///
+/// Authentication is two tokens:
+/// - [developerToken]   -> `Authorization: Bearer <jwt>` (app-wide, scraped from
+///                          the web player, valid for months)
+/// - [userToken]        -> `Media-User-Token: <token>` (per-user, the
+///                          `media-user-token` cookie set after login)
+/// and a [storefront] (e.g. "us") that is part of every catalog path.
+class AppleMusicApi {
+  var client: HttpClient
+  var developerToken: string
+  var userToken: string
+  var storefront: string = "us"
+
+  construct () {
+    client = HttpClient()
+  }
+
+  fun setCredentials({
+    developerToken: string,
+    userToken: string,
+    storefront: string,
+  }) {
+    if (developerToken != null) this.developerToken = developerToken
+    if (userToken != null) this.userToken = userToken
+    if (storefront != null) this.storefront = storefront
+  }
+
+  fun _headers({ withUser: bool }) -> Map {
+    var headers = {
+      "Authorization": "Bearer ${developerToken}",
+      "Origin": "https://music.apple.com",
+    }.toJson()
+
+    if (withUser != false && userToken != null) {
+      headers["Media-User-Token"] = userToken
+    }
+
+    return headers
+  }
+
+  fun _options({ withUser: bool, method: string }) -> RequestOptions {
+    return RequestOptions(
+      method: method,
+      headers: _headers(withUser: withUser),
+      // Don't throw on 4xx so callers can inspect 404/409 themselves
+      // (used by library-membership checks and idempotent saves).
+      validateStatus: (status) => status != null && status < 500,
+    )
+  }
+
+  // --- low level verbs ---------------------------------------------------
+
+  fun _get(path: string, { query: Map, withUser: bool }) -> Future {
+    return client.get_req(
+      "${baseUrl}${path}",
+      queryParameters: query,
+      options: _options(withUser: withUser),
+    ).then((res) => res.data)
+  }
+
+  fun _send(method: string, path: string, { query: Map, data, withUser: bool }) -> Future {
+    return client.request(
+      path: "${baseUrl}${path}",
+      data: data,
+      queryParameters: query,
+      options: _options(withUser: withUser, method: method),
+    ).then((res) => res.data)
+  }
+
+  // --- catalog -----------------------------------------------------------
+
+  /// Fetch a single catalog resource (`songs`, `albums`, `artists`, `playlists`).
+  fun getResource(type: string, id: string, { include: string, views: string, extend: string }) -> Future {
+    var query = {}.toJson()
+    if (include != null) query["include"] = include
+    if (views != null) query["views"] = views
+    if (extend != null) query["extend"] = extend
+
+    return _get("/v1/catalog/${storefront}/${type}/${id}", query: query)
+      .then((data) => data["data"]?.first)
+  }
+
+  /// Fetch many catalog resources of one type at once.
+  fun getResources(type: string, ids: List, { include: string }) -> Future {
+    var query = { "ids": ids.join(",") }.toJson()
+    if (include != null) query["include"] = include
+
+    return _get("/v1/catalog/${storefront}/${type}", query: query)
+      .then((data) => data["data"] ?? [])
+  }
+
+  /// Fetch a paginated relationship of a catalog resource,
+  /// e.g. an album's `tracks` or an artist's `albums`.
+  fun getRelationship(type: string, id: string, relationship: string, { offset: int, limit: int }) -> Future {
+    var query = {}.toJson()
+    if (offset != null) query["offset"] = offset
+    if (limit != null) query["limit"] = limit
+
+    return _get("/v1/catalog/${storefront}/${type}/${id}/${relationship}", query: query)
+  }
+
+  fun search(term: string, { types: string, offset: int, limit: int }) -> Future {
+    var query = {
+      "term": term,
+      "types": types ?? "songs,albums,artists,playlists",
+    }.toJson()
+    if (offset != null) query["offset"] = offset
+    if (limit != null) query["limit"] = limit
+
+    return _get("/v1/catalog/${storefront}/search", query: query)
+      .then((data) => data["results"] ?? {}.toJson())
+  }
+
+  fun charts({ types: string, limit: int }) -> Future {
+    var query = { "types": types ?? "songs,albums,playlists" }.toJson()
+    if (limit != null) query["limit"] = limit
+
+    return _get("/v1/catalog/${storefront}/charts", query: query)
+      .then((data) => data["results"] ?? {}.toJson())
+  }
+
+  // --- user / library ----------------------------------------------------
+
+  fun getStorefront() -> Future {
+    return _get("/v1/me/storefront", withUser: true)
+      .then((data) => data["data"]?.first)
+  }
+
+  fun getLibrary(type: string, { offset: int, limit: int, include: string }) -> Future {
+    var query = {}.toJson()
+    if (offset != null) query["offset"] = offset
+    if (limit != null) query["limit"] = limit
+    if (include != null) query["include"] = include
+
+    return _get("/v1/me/library/${type}", query: query, withUser: true)
+  }
+
+  fun getLibraryRelationship(type: string, id: string, relationship: string, { offset: int, limit: int }) -> Future {
+    var query = {}.toJson()
+    if (offset != null) query["offset"] = offset
+    if (limit != null) query["limit"] = limit
+
+    return _get("/v1/me/library/${type}/${id}/${relationship}", query: query, withUser: true)
+  }
+
+  fun recommendations({ offset: int, limit: int }) -> Future {
+    var query = {}.toJson()
+    if (offset != null) query["offset"] = offset
+    if (limit != null) query["limit"] = limit
+
+    return _get("/v1/me/recommendations", query: query, withUser: true)
+  }
+
+  fun recommendation(id: string, { offset: int, limit: int }) -> Future {
+    var query = {}.toJson()
+    if (offset != null) query["offset"] = offset
+    if (limit != null) query["limit"] = limit
+
+    return _get("/v1/me/recommendations/${id}", query: query, withUser: true)
+      .then((data) => data["data"]?.first)
+  }
+
+  /// Add catalog items to the user's library.
+  /// [type] is the plural catalog type (`songs`, `albums`, `artists`, `playlists`).
+  fun addToLibrary(type: string, ids: List) -> Future {
+    var query = {}.toJson()
+    query["ids[${type}]"] = ids.join(",")
+    return _send("POST", "/v1/me/library", query: query, withUser: true)
+  }
+
+  /// Remove a *library* item (note: library ids, e.g. `i.xxx`, not catalog ids).
+  fun removeFromLibrary(type: string, libraryId: string) -> Future {
+    return _send("DELETE", "/v1/me/library/${type}/${libraryId}", withUser: true)
+  }
+
+  /// Rate a catalog resource. [value] is 1 (love) or -1 (dislike).
+  fun setRating(type: string, id: string, value: int) -> Future {
+    return _send(
+      "PUT",
+      "/v1/me/ratings/${type}/${id}",
+      data: { "type": "rating", "attributes": { "value": value } }.toJson(),
+      withUser: true,
+    )
+  }
+
+  fun deleteRating(type: string, id: string) -> Future {
+    return _send("DELETE", "/v1/me/ratings/${type}/${id}", withUser: true)
+  }
+
+  // --- library playlists -------------------------------------------------
+
+  fun createPlaylist({ name: string, description: string }) -> Future {
+    var attributes = { "name": name ?? "New Playlist" }.toJson()
+    if (description != null) attributes["description"] = description
+
+    return _send(
+      "POST",
+      "/v1/me/library/playlists",
+      data: { "attributes": attributes }.toJson(),
+      withUser: true,
+    ).then((data) => data["data"]?.first)
+  }
+
+  fun addPlaylistTracks(playlistId: string, songIds: List) -> Future {
+    var data = songIds.map((id) => { "id": id, "type": "songs" }.toJson()).toList()
+    return _send(
+      "POST",
+      "/v1/me/library/playlists/${playlistId}/tracks",
+      data: { "data": data }.toJson(),
+      withUser: true,
+    )
+  }
+
+  fun updatePlaylist(playlistId: string, { name: string, description: string }) -> Future {
+    var attributes = {}.toJson()
+    if (name != null) attributes["name"] = name
+    if (description != null) attributes["description"] = description
+
+    return _send(
+      "PATCH",
+      "/v1/me/library/playlists/${playlistId}",
+      data: { "attributes": attributes }.toJson(),
+      withUser: true,
+    )
+  }
+
+  /// Resolve a catalog id to the user's matching *library* id (needed because
+  /// Apple's delete-from-library endpoints only accept library ids). Scans the
+  /// most-recently-added library items, which covers the common "undo" case.
+  fun findLibraryId(type: string, catalogId: string, { limit: int }) -> Future {
+    return getLibrary(type, limit: limit ?? 100, include: "catalog").then((data) {
+      var items = data["data"] ?? []
+      var match = items.firstWhere((item) {
+        var playParams = item["attributes"]?["playParams"]
+        var catalog = item["relationships"]?["catalog"]?["data"]
+        var cid = (playParams != null ? playParams["catalogId"] : null)
+          ?? (catalog != null && !catalog.isEmpty ? catalog.first["id"] : null)
+        return cid == catalogId
+      }, orElse: () => null)
+      return match?["id"]
+    })
+  }
+
+  /// Best-effort removal of catalog items from the library by catalog id.
+  fun removeCatalogFromLibrary(type: string, catalogIds: List) async {
+    for (var catalogId in catalogIds) {
+      var libraryId = await findLibraryId(type, catalogId)
+      if (libraryId != null) {
+        await removeFromLibrary(type, libraryId)
+      }
+    }
+    return true
+  }
+}
+
+export { AppleMusicApi }

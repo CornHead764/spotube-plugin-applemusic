@@ -1,0 +1,71 @@
+import { AppleMusicApi } from '../api/apple_music_api.ht'
+import { Converters } from '../converter/converter.ht'
+
+class PlaylistEndpoint {
+  var client: AppleMusicApi
+
+  construct (this.client)
+
+  fun getPlaylist(id: string) {
+    return client.getResource("playlists", id).then((data) {
+      if (data == null) return null
+      return Converters.fullPlaylists([data])[0]
+    })
+  }
+
+  fun tracks(id: string, { offset: int, limit: int }) {
+    return client.getRelationship("playlists", id, "tracks", offset: offset, limit: limit).then((data) {
+      var paginated = Converters.paginated(data, offset, limit, (items) => Converters.fullTracks(items))
+
+      // Drop anything without a playable catalog id.
+      paginated["items"] = paginated["items"].where((item) => item != null && item["id"] != null).toList()
+
+      return paginated
+    })
+  }
+
+  fun create(userId: string, {
+    name: string,
+    description: string,
+    public: bool,
+    collaborative: bool
+  }) {
+    return client.createPlaylist(name: name, description: description).then((data) {
+      return Converters.fullPlaylists([data])[0]
+    })
+  }
+
+  fun update(playlistId: string, {
+    name: string,
+    description: string,
+    public: bool,
+    collaborative: bool
+  }) {
+    return client.updatePlaylist(playlistId, name: name, description: description)
+  }
+
+  fun deletePlaylist(playlistId: string) {
+    return this.unsave(playlistId)
+  }
+
+  fun addTracks(playlistId: string, { trackIds: List, position: int }) {
+    return client.addPlaylistTracks(playlistId, trackIds)
+  }
+
+  /// Apple Music's public API does not support removing tracks from a library
+  /// playlist, so this is a no-op that resolves to false.
+  fun removeTracks(playlistId: string, { trackIds: List }) {
+    return false
+  }
+
+  fun save(playlistId: string) async {
+    await client.addToLibrary("playlists", [playlistId])
+    return true
+  }
+
+  fun unsave(playlistId: string) {
+    return client.removeCatalogFromLibrary("playlists", [playlistId])
+  }
+}
+
+export { PlaylistEndpoint }

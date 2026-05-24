@@ -1,0 +1,41 @@
+import { AppleMusicApi } from '../api/apple_music_api.ht'
+import { Converters } from '../converter/converter.ht'
+
+class TrackEndpoint {
+  var client: AppleMusicApi
+
+  construct (this.client)
+
+  fun getTrack(id: string) {
+    return client.getResource("songs", id, include: "artists,albums").then((data) {
+      return Converters.fullTracks([data])[0]
+    })
+  }
+
+  fun save(trackIds: List) async {
+    await client.addToLibrary("songs", trackIds)
+    return true
+  }
+
+  fun unsave(trackIds: List) {
+    return client.removeCatalogFromLibrary("songs", trackIds)
+  }
+
+  /// Apple Music has no public "song radio" endpoint, so we approximate it
+  /// with the primary artist's top songs.
+  fun radio(trackId: string) {
+    return client.getResource("songs", trackId, include: "artists").then((song) {
+      var artists = song["relationships"]?["artists"]?["data"]
+      if (artists == null || artists.isEmpty) {
+        return Converters.fullTracks([song])
+      }
+      var artistId = artists.first["id"]
+      return client.getResource("artists", artistId, views: "top-songs").then((artist) {
+        var top = artist["views"]?["top-songs"]?["data"] ?? []
+        return Converters.fullTracks(top)
+      })
+    })
+  }
+}
+
+export { TrackEndpoint }

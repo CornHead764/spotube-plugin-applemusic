@@ -1,0 +1,109 @@
+import { AppleMusicApi } from '../api/apple_music_api.ht'
+import { Converters } from '../converter/converter.ht'
+
+class BrowseEndpoint {
+  var client: AppleMusicApi
+
+  construct (this.client)
+
+  /// Convert a mixed list of catalog resources (albums/playlists/artists)
+  /// into a single ordered list of Spotube items.
+  fun _mixedItems(contents: List) -> List {
+    if (contents == null) return []
+    var playlists = contents.where((c) => c["type"] == "playlists").toList()
+    var albums = contents.where((c) => c["type"] == "albums").toList()
+    var artists = contents.where((c) => c["type"] == "artists").toList()
+
+    return [
+      ...Converters.simplePlaylists(playlists),
+      ...Converters.simpleAlbums(albums),
+      ...Converters.fullArtists(artists),
+    ]
+  }
+
+  fun _sectionFromRecommendation(rec: Map) -> Map {
+    var contents = rec["relationships"]?["contents"]?["data"] ?? []
+    var title = rec["attributes"]?["title"]
+    return {
+      id: rec["id"],
+      title: title?["stringForDisplay"] ?? title ?? "Recommended",
+      externalUri: "https://music.apple.com/${client.storefront}/listen-now",
+      browseMore: rec["relationships"]?["contents"]?["next"] != null,
+      items: _mixedItems(contents),
+    }.toJson()
+  }
+
+  fun _sectionsFromCharts() {
+    return client.charts(types: "playlists,albums", limit: 20).then((results) {
+      var sections = []
+      var playlistChart = results["playlists"]?.first
+      var albumChart = results["albums"]?.first
+
+      if (playlistChart != null) {
+        sections.add({
+          id: "charts:playlists",
+          title: playlistChart["name"] ?? "Top Playlists",
+          externalUri: "https://music.apple.com/${client.storefront}/browse",
+          browseMore: false,
+          items: Converters.simplePlaylists(playlistChart["data"] ?? []),
+        }.toJson())
+      }
+
+      if (albumChart != null) {
+        sections.add({
+          id: "charts:albums",
+          title: albumChart["name"] ?? "Top Albums",
+          externalUri: "https://music.apple.com/${client.storefront}/browse",
+          browseMore: false,
+          items: Converters.simpleAlbums(albumChart["data"] ?? []),
+        }.toJson())
+      }
+
+      return {
+        limit: 20,
+        nextOffset: null,
+        hasMore: false,
+        total: sections.length,
+        items: sections,
+      }.toJson()
+    })
+  }
+
+  fun sections({ offset: int, limit: int }) {
+    return client.recommendations(offset: offset, limit: limit).then((data) {
+      var recs = data?["data"] ?? []
+      if (recs.isEmpty) {
+        // Not signed in (or no recommendations) -> editorial charts.
+        return _sectionsFromCharts()
+      }
+
+      return {
+        limit: limit ?? 20,
+        nextOffset: data["next"] != null ? (offset ?? 0) + (limit ?? 20) : null,
+        hasMore: data["next"] != null,
+        total: data["meta"]?["total"] ?? recs.length,
+        items: recs.map((rec) => _sectionFromRecommendation(rec)).toList(),
+      }.toJson()
+    })
+  }
+
+  fun sectionItems(id: string, { offset: int, limit: int }) {
+    if (id.startsWith("charts:")) {
+      var type = id.split(":")[1]
+      return client.charts(types: type, limit: limit ?? 20).then((results) {
+        var section = results[type]?.first
+        var convert = type == "albums"
+          ? (items) => Converters.simpleAlbums(items)
+          : (items) => Converters.simplePlaylists(items)
+        return Converters.searchPaginated(section, offset, limit, convert)
+      })
+    }
+
+    return client.recommendation(id, offset: offset, limit: limit).then((rec) {
+      var contents = rec["relationships"]?["contents"] ?? {}.toJson()
+      return Converters.paginated(contents, offset, limit, (items) => _mixedItems(items))
+    })
+  }
+}
+
+export { BrowseEndpoint }

@@ -1,0 +1,80 @@
+import { AppleMusicApi } from '../api/apple_music_api.ht'
+import { Converters } from '../converter/converter.ht'
+
+class UserEndpoint {
+  var client: AppleMusicApi
+
+  construct (this.client)
+
+  /// Apple Music has no public user-profile endpoint, so we surface the
+  /// storefront (country) as the user identity.
+  fun me() {
+    return client.getStorefront().then((storefront) {
+      return {
+        id: storefront?["id"] ?? client.storefront,
+        name: storefront?["attributes"]?["name"] ?? "Apple Music",
+        images: [],
+        externalUri: null,
+      }.toJson()
+    })
+  }
+
+  fun savedTracks({ offset: int, limit: int }) {
+    return client.getLibrary("songs", offset: offset, limit: limit, include: "catalog,artists").then(
+      (data) => Converters.paginated(data, offset, limit, (items) => Converters.fullTracks(items))
+    )
+  }
+
+  fun savedPlaylists({ offset: int, limit: int }) {
+    return client.getLibrary("playlists", offset: offset, limit: limit, include: "catalog").then(
+      (data) => Converters.paginated(data, offset, limit, (items) => Converters.simplePlaylists(items))
+    )
+  }
+
+  fun savedAlbums({ offset: int, limit: int }) {
+    return client.getLibrary("albums", offset: offset, limit: limit, include: "catalog,artists").then(
+      (data) => Converters.paginated(data, offset, limit, (items) => Converters.simpleAlbums(items))
+    )
+  }
+
+  fun savedArtists({ offset: int, limit: int }) {
+    return client.getLibrary("artists", offset: offset, limit: limit, include: "catalog").then(
+      (data) => Converters.paginated(data, offset, limit, (items) => Converters.fullArtists(items))
+    )
+  }
+
+  fun _inLibraryMap(resources: List) -> Map {
+    var map = {}.toJson()
+    for (var resource in resources) {
+      if (resource == null) continue
+      var library = resource["relationships"]?["library"]?["data"]
+      map[resource["id"]] = library != null && !library.isEmpty
+    }
+    return map
+  }
+
+  fun _isSaved(type: string, ids: List) {
+    return client.getResources(type, ids, include: "library").then((resources) {
+      var map = _inLibraryMap(resources)
+      return ids.map((id) => map[id] ?? false).toList()
+    })
+  }
+
+  fun isSavedTracks(trackIds: List) { // Future<List<bool>>
+    return _isSaved("songs", trackIds)
+  }
+
+  fun isSavedAlbums(albumIds: List) { // Future<List<bool>>
+    return _isSaved("albums", albumIds)
+  }
+
+  fun isSavedArtists(artistIds: List) { // Future<List<bool>>
+    return _isSaved("artists", artistIds)
+  }
+
+  fun isSavedPlaylist(playlistId: string) { // Future<bool>
+    return _isSaved("playlists", [playlistId]).then((results) => results.first ?? false)
+  }
+}
+
+export { UserEndpoint }

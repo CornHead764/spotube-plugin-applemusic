@@ -1,0 +1,324 @@
+/// Converts Apple Music API resources into the common shapes Spotube expects
+/// (the same shapes the Spotify plugin emits: id / name / externalUri /
+/// artists / album / images / durationMs / isrc / ...).
+///
+/// Apple resources look like `{ id, type, attributes: {...}, relationships: {...} }`.
+/// Library resources additionally carry the playable catalog id under
+/// `attributes.playParams.catalogId` or `relationships.catalog.data[0].id`.
+class Converters {
+  // --- helpers -----------------------------------------------------------
+
+  /// Best playable/navigable id for a resource: the catalog id when this is a
+  /// library resource, otherwise the resource's own id.
+  static fun catalogId(resource: Map) -> string {
+    if (resource == null) return null
+
+    var playParams = resource["attributes"]?["playParams"]
+    if (playParams != null && playParams["catalogId"] != null) {
+      return playParams["catalogId"]
+    }
+
+    var catalog = resource["relationships"]?["catalog"]?["data"]
+    if (catalog != null && !catalog.isEmpty) {
+      return catalog.first["id"]
+    }
+
+    return resource["id"]
+  }
+
+  /// Turns an Apple artwork object (`{ url: ".../{w}x{h}bb.jpg", width, height }`)
+  /// into a list of Spotify-style image objects at a few resolutions.
+  static fun artwork(art: Map) -> List {
+    if (art == null || art["url"] == null) return []
+
+    var template = art["url"]
+
+    var sized = (w, h) {
+      var url = template
+        .replaceAll("{w}", w.toString())
+        .replaceAll("{h}", h.toString())
+        .replaceAll("{f}", "jpg")
+        .replaceAll("{c}", "bb")
+      return { url: url, width: w, height: h }.toJson()
+    }
+
+    return [sized(640, 640), sized(300, 300), sized(64, 64)]
+  }
+
+  static fun precision(releaseDate: string) -> string {
+    if (releaseDate == null) return "year"
+    return releaseDate.length >= 10 ? "day" : "year"
+  }
+
+  static fun userFromName(name: string) -> Map {
+    return {
+      id: null,
+      name: name ?? "Apple Music",
+      images: [],
+      externalUri: null,
+    }.toJson()
+  }
+
+  static fun artistsOf(resource: Map) -> List {
+    var artists = resource["relationships"]?["artists"]?["data"]
+    if (artists != null && !artists.isEmpty) {
+      return simpleArtists(artists)
+    }
+
+    var name = resource["attributes"]?["artistName"]
+    if (name == null) return []
+
+    return [{
+      id: null,
+      name: name,
+      externalUri: null,
+      images: [],
+    }.toJson()]
+  }
+
+  static fun albumOf(song: Map) -> Map {
+    var albums = song["relationships"]?["albums"]?["data"]
+    if (albums != null && !albums.isEmpty) {
+      return simpleAlbums(albums)[0]
+    }
+
+    // Fall back to a synthetic album from the song's own attributes — the
+    // song artwork is the album artwork on Apple Music.
+    var attr = song["attributes"] ?? {}.toJson()
+    return {
+      id: null,
+      name: attr["albumName"],
+      externalUri: null,
+      releaseDate: attr["releaseDate"],
+      releaseDatePrecision: precision(attr["releaseDate"]),
+      artists: artistsOf(song),
+      images: artwork(attr["artwork"]),
+      albumType: "album",
+    }.toJson()
+  }
+
+  static fun albumType(attr: Map) -> string {
+    if (attr["isSingle"] == true) return "single"
+    if (attr["isCompilation"] == true) return "compilation"
+    return "album"
+  }
+
+  // --- pagination --------------------------------------------------------
+
+  /// Paginate an Apple list response (`{ data, next, meta: { total } }`).
+  static fun paginated(data: Map, offset: int, limit: int, convertItems: (items: List) -> List) -> Map {
+    var items = data["data"] ?? []
+    var total = data["meta"]?["total"] ?? items.length
+    var off = offset ?? 0
+    var lim = limit ?? items.length
+    var hasMore = data["next"] != null || (total > off + items.length)
+
+    return {
+      limit: lim,
+      nextOffset: hasMore ? off + (lim > 0 ? lim : items.length) : null,
+      hasMore: hasMore,
+      total: total,
+      items: convertItems(items.where((item) => item != null).toList()),
+    }.toJson()
+  }
+
+  /// Paginate one section of a search response (`{ data, next, href }`),
+  /// which has no `meta.total`.
+  static fun searchPaginated(section: Map, offset: int, limit: int, convertItems: (items: List) -> List) -> Map {
+    var items = section?["data"] ?? []
+    var hasMore = section?["next"] != null
+    var off = offset ?? 0
+    var lim = limit ?? items.length
+
+    return {
+      limit: lim,
+      nextOffset: hasMore ? off + (lim > 0 ? lim : items.length) : null,
+      hasMore: hasMore,
+      total: off + items.length + (hasMore ? lim : 0),
+      items: convertItems(items.where((item) => item != null).toList()),
+    }.toJson()
+  }
+
+  // --- tracks ------------------------------------------------------------
+
+  static fun fullTracks(tracks: List) -> List {
+    if (tracks == null || tracks.isEmpty) return []
+
+    var modified = []
+    for (var track in tracks) {
+      if (track == null) {
+        modified.add(null)
+        continue
+      }
+
+      var attr = track["attributes"] ?? {}.toJson()
+      var id = catalogId(track)
+
+      modified.add({
+        id: id,
+        name: attr["name"],
+        externalUri: attr["url"] ?? "https://music.apple.com/song/${id}",
+        explicit: attr["contentRating"] == "explicit",
+        durationMs: attr["durationInMillis"] ?? 0,
+        isrc: attr["isrc"] ?? "",
+        artists: artistsOf(track),
+        album: albumOf(track),
+      }.toJson())
+    }
+
+    return modified
+  }
+
+  // --- albums ------------------------------------------------------------
+
+  static fun fullAlbums(albums: List) -> List {
+    if (albums == null || albums.isEmpty) return []
+
+    var modified = []
+    for (var album in albums) {
+      if (album == null) continue
+      var attr = album["attributes"] ?? {}.toJson()
+      var id = catalogId(album)
+
+      modified.add({
+        id: id,
+        name: attr["name"],
+        externalUri: attr["url"] ?? "https://music.apple.com/album/${id}",
+        releaseDate: attr["releaseDate"] ?? "",
+        releaseDatePrecision: precision(attr["releaseDate"]),
+        totalTracks: attr["trackCount"] ?? 0,
+        artists: artistsOf(album),
+        images: artwork(attr["artwork"]),
+        albumType: albumType(attr),
+        recordLabel: attr["recordLabel"],
+        genres: attr["genreNames"] ?? [],
+      }.toJson())
+    }
+
+    return modified
+  }
+
+  static fun simpleAlbums(albums: List) -> List {
+    if (albums == null || albums.isEmpty) return []
+
+    var modified = []
+    for (var album in albums) {
+      if (album == null) continue
+      var attr = album["attributes"] ?? {}.toJson()
+      var id = catalogId(album)
+
+      modified.add({
+        id: id,
+        name: attr["name"],
+        externalUri: attr["url"] ?? "https://music.apple.com/album/${id}",
+        releaseDate: attr["releaseDate"],
+        releaseDatePrecision: precision(attr["releaseDate"]),
+        artists: artistsOf(album),
+        images: artwork(attr["artwork"]),
+        albumType: albumType(attr),
+      }.toJson())
+    }
+
+    return modified
+  }
+
+  // --- artists -----------------------------------------------------------
+
+  static fun fullArtists(artists: List) -> List {
+    if (artists == null || artists.isEmpty) return []
+
+    var modified = []
+    for (var artist in artists) {
+      if (artist == null) continue
+      var attr = artist["attributes"] ?? {}.toJson()
+      var id = catalogId(artist)
+
+      modified.add({
+        id: id,
+        name: attr["name"],
+        externalUri: attr["url"] ?? "https://music.apple.com/artist/${id}",
+        images: artwork(attr["artwork"]),
+        genres: attr["genreNames"] ?? [],
+        followers: null,
+      }.toJson())
+    }
+
+    return modified
+  }
+
+  static fun simpleArtists(artists: List) -> List {
+    if (artists == null || artists.isEmpty) return []
+
+    var modified = []
+    for (var artist in artists) {
+      if (artist == null) continue
+      var attr = artist["attributes"] ?? {}.toJson()
+      var id = catalogId(artist)
+
+      modified.add({
+        id: id,
+        name: attr["name"],
+        externalUri: attr["url"] ?? "https://music.apple.com/artist/${id}",
+        images: artwork(attr["artwork"]),
+      }.toJson())
+    }
+
+    return modified
+  }
+
+  // --- playlists ---------------------------------------------------------
+
+  static fun playlistDescription(attr: Map) -> string {
+    var desc = attr["description"]
+    if (desc == null) return null
+    return desc["standard"] ?? desc["short"]
+  }
+
+  static fun simplePlaylists(playlists: List) -> List {
+    if (playlists == null || playlists.isEmpty) return []
+
+    var modified = []
+    for (var playlist in playlists) {
+      if (playlist == null) continue
+      var attr = playlist["attributes"] ?? {}.toJson()
+      var id = catalogId(playlist)
+
+      modified.add({
+        id: id,
+        name: attr["name"],
+        description: playlistDescription(attr),
+        images: artwork(attr["artwork"]),
+        externalUri: attr["url"] ?? "https://music.apple.com/playlist/${id}",
+        owner: userFromName(attr["curatorName"]),
+      }.toJson())
+    }
+
+    return modified
+  }
+
+  static fun fullPlaylists(playlists: List) -> List {
+    if (playlists == null || playlists.isEmpty) return []
+
+    var modified = []
+    for (var playlist in playlists) {
+      if (playlist == null) continue
+      var attr = playlist["attributes"] ?? {}.toJson()
+      var id = catalogId(playlist)
+
+      modified.add({
+        id: id,
+        name: attr["name"],
+        description: playlistDescription(attr),
+        images: artwork(attr["artwork"]),
+        externalUri: attr["url"] ?? "https://music.apple.com/playlist/${id}",
+        owner: userFromName(attr["curatorName"] ?? "You"),
+        collaborative: false,
+        public: attr["isPublic"] ?? true,
+      }.toJson())
+    }
+
+    return modified
+  }
+}
+
+export { Converters }

@@ -1,0 +1,41 @@
+import { AppleMusicApi } from '../api/apple_music_api.ht'
+import { Converters } from '../converter/converter.ht'
+
+class AlbumEndpoint {
+  var client: AppleMusicApi
+
+  construct (this.client)
+
+  fun getAlbum(id: string) {
+    return client.getResource("albums", id, include: "artists").then((album) {
+      if (album == null) return null
+      return Converters.fullAlbums([album])[0]
+    })
+  }
+
+  fun tracks(id: string, { offset: int, limit: int }) {
+    return client.getRelationship("albums", id, "tracks", offset: offset, limit: limit).then((data) {
+      return Converters.paginated(data, offset, limit, (items) => Converters.fullTracks(items))
+    })
+  }
+
+  /// Apple Music has no "new releases" endpoint; the albums chart is the
+  /// closest public equivalent.
+  fun releases({ offset: int, limit: int }) {
+    return client.charts(types: "albums", limit: limit).then((results) {
+      var section = results["albums"]?.first
+      return Converters.searchPaginated(section, offset, limit, (items) => Converters.simpleAlbums(items))
+    })
+  }
+
+  fun save(albumIds: List) async {
+    await client.addToLibrary("albums", albumIds)
+    return true
+  }
+
+  fun unsave(albumIds: List) {
+    return client.removeCatalogFromLibrary("albums", albumIds)
+  }
+}
+
+export { AlbumEndpoint }

@@ -1,0 +1,49 @@
+import { AppleMusicApi } from '../api/apple_music_api.ht'
+import { Converters } from '../converter/converter.ht'
+
+class SearchEndpoint {
+  var client: AppleMusicApi
+
+  construct (this.client)
+
+  get chips -> List {
+    return ["all", "tracks", "albums", "artists", "playlists"]
+  }
+
+  fun all(query: string) {
+    return client.search(query, types: "songs,albums,artists,playlists", limit: 20).then((results) {
+      return {
+        artists: Converters.simpleArtists(results["artists"]?["data"] ?? []),
+        albums: Converters.simpleAlbums(results["albums"]?["data"] ?? []),
+        tracks: Converters.fullTracks(results["songs"]?["data"] ?? []),
+        playlists: Converters.simplePlaylists(results["playlists"]?["data"] ?? []),
+      }.toJson()
+    })
+  }
+
+  fun albums(query: string, { offset: int, limit: int }) {
+    return client.search(query, types: "albums", offset: offset, limit: limit).then(
+      (results) => Converters.searchPaginated(results["albums"], offset, limit, (items) => Converters.simpleAlbums(items))
+    )
+  }
+
+  fun artists(query: string, { offset: int, limit: int }) {
+    return client.search(query, types: "artists", offset: offset, limit: limit).then(
+      (results) => Converters.searchPaginated(results["artists"], offset, limit, (items) => Converters.simpleArtists(items))
+    )
+  }
+
+  fun tracks(query: string, { offset: int, limit: int }) {
+    return client.search(query, types: "songs", offset: offset, limit: limit).then(
+      (results) => Converters.searchPaginated(results["songs"], offset, limit, (items) => Converters.fullTracks(items))
+    )
+  }
+
+  fun playlists(query: string, { offset: int, limit: int }) {
+    return client.search(query, types: "playlists", offset: offset, limit: limit).then(
+      (results) => Converters.searchPaginated(results["playlists"], offset, limit, (items) => Converters.simplePlaylists(items))
+    )
+  }
+}
+
+export { SearchEndpoint }

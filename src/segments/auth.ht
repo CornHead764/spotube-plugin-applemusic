@@ -1,0 +1,304 @@
+import 'module:std' as std
+import 'module:spotube_plugin' as spotube
+
+var StreamController = std.StreamController
+var Stream = std.Stream
+var StreamSubscription = std.StreamSubscription
+var DateTime = std.DateTime
+var Duration = std.Duration
+var HttpClient = std.HttpClient
+var RequestOptions = std.RequestOptions
+var HttpResponseType = std.HttpResponseType
+var Timer = std.Timer
+var JSON = std.JSON
+var Regex = std.Regex
+var LocalStorage = spotube.LocalStorage
+var Webview = spotube.Webview
+var SpotubeForm = spotube.SpotubeForm
+
+/// How long a scraped developer token is trusted before it is re-scraped.
+/// (The JWT itself lasts months; the periodic re-scrape just keeps it fresh
+/// and cheaply self-heals if Apple rotates it.)
+const developerTokenTtlHours = 12
+
+/// Handles Apple Music authentication.
+///
+/// Unlike a classic OAuth flow, Apple Music's web stack uses two tokens:
+/// - a long-lived **developer token** (a JWT) embedded in the web player's
+///   JS bundle, shared by every visitor, and
+/// - a per-user **Media-User-Token**, delivered as the `media-user-token`
+///   cookie once the user signs in at music.apple.com.
+///
+/// We open music.apple.com in a webview, wait for the `media-user-token`
+/// cookie, scrape the developer token, and resolve the user's storefront.
+class AppleMusicAuthEndpoint {
+  final controller: StreamController
+  var _timer: Timer
+  /// Map of:
+  /// - `mediaUserToken`: the per-user token (from the cookie)
+  /// - `developerToken`: the shared web-player JWT
+  /// - `storefront`: e.g. "us"
+  /// - `expiration`: ms-since-epoch after which we re-scrape the developer token
+  var credentials: Map
+  var client: HttpClient
+
+  get authStateStream -> Stream => controller.stream
+
+  construct (onEvent: (data) -> void) {
+    controller = StreamController.broadcast()
+    client = HttpClient()
+
+    controller.stream.listen((event) {
+      if (onEvent != null) {
+        onEvent(event)
+      }
+      if (event["type"] == "recovered" || event["type"] == "login") {
+        _timer?.cancel()
+        _timer = Timer.periodic(getExpirationDuration(), (cancel) {
+          refreshCredentials()
+        })
+      }
+    })
+
+    initializeFromLocalStorage()
+  }
+
+  fun isExpired() -> bool {
+    if (credentials == null) return true
+    final currentTime = DateTime.now()
+    final expirationTime = DateTime.fromMillisecondsSinceEpoch(credentials["expiration"])
+    return currentTime.isAfter(expirationTime)
+  }
+
+  fun getExpirationDuration() -> Duration {
+    if (credentials == null) return Duration(hours: developerTokenTtlHours)
+    final currentTime = DateTime.now()
+    final expirationTime = DateTime.fromMillisecondsSinceEpoch(credentials["expiration"])
+    final diff = expirationTime.difference(currentTime)
+    return diff.isNegative ? Duration(hours: developerTokenTtlHours) : diff
+  }
+
+  fun isAuthenticated() -> bool {
+    return credentials != null && credentials["mediaUserToken"] != null
+  }
+
+  fun initializeFromLocalStorage() {
+    LocalStorage.getString("credentials").then((credentialsStr) {
+      if (credentialsStr != null) {
+        credentials = JSON.decode(credentialsStr)
+        if (isExpired()) {
+          refreshCredentials()
+        } else {
+          controller.add({ type: "recovered" }.toJson())
+        }
+      }
+    })
+  }
+
+  // --- token scraping ----------------------------------------------------
+
+  fun _textOptions() -> RequestOptions {
+    return RequestOptions(
+      responseType: HttpResponseType.plain,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+      }.toJson(),
+      validateStatus: (status) => status != null && status < 500,
+    )
+  }
+
+  /// Pull the shared developer-token JWT out of the web player.
+  /// It usually lives inside the hashed `index-*.js` bundle; some builds also
+  /// inline it in the homepage HTML, which we try first.
+  fun fetchDeveloperToken() -> Future {
+    final jwtExp = Regex("eyJ[\\w-]+\\.[\\w-]+\\.[\\w-]+")
+
+    return client.get_req(
+      "https://music.apple.com/us/browse",
+      options: _textOptions(),
+    ).then((res) {
+      final html = res.data.toString()
+
+      // 1) token inlined directly in the page
+      final inline = jwtExp.firstMatch(html)
+      if (inline != null) {
+        return inline.group(0)
+      }
+
+      // 2) otherwise locate the JS bundle and scrape it
+      final bundleMatch = Regex("/assets/index[^\"']*\\.js").firstMatch(html)
+        ?? Regex("/assets/[^\"']*\\.js").firstMatch(html)
+
+      if (bundleMatch == null) {
+        throw "Could not locate the Apple Music web player bundle to read the developer token."
+      }
+
+      return client.get_req(
+        "https://music.apple.com${bundleMatch.group(0)}",
+        options: _textOptions(),
+      ).then((jsRes) {
+        final tokenMatch = jwtExp.firstMatch(jsRes.data.toString())
+        if (tokenMatch == null) {
+          throw "Could not extract the Apple Music developer token from the web player."
+        }
+        return tokenMatch.group(0)
+      })
+    })
+  }
+
+  fun _fetchStorefront(developerToken: string, mediaUserToken: string) -> Future {
+    return client.get_req(
+      "https://amp-api.music.apple.com/v1/me/storefront",
+      options: RequestOptions(
+        headers: {
+          "Authorization": "Bearer ${developerToken}",
+          "Media-User-Token": mediaUserToken,
+          "Origin": "https://music.apple.com",
+        }.toJson(),
+        validateStatus: (status) => status != null && status < 500,
+      ),
+    ).then((res) {
+      return res.data?["data"]?.first?["id"] ?? "us"
+    })
+  }
+
+  fun _assembleCredentials(mediaUserToken: string, developerToken: string) -> Future {
+    return _fetchStorefront(developerToken, mediaUserToken).then((storefront) {
+      return {
+        mediaUserToken: mediaUserToken,
+        developerToken: developerToken,
+        storefront: storefront,
+        expiration: DateTime.now().add(Duration(hours: developerTokenTtlHours)).millisecondsSinceEpoch,
+      }
+    })
+  }
+
+  /// Build the credentials map for a known Media-User-Token, scraping the
+  /// developer token first unless one was supplied.
+  fun _buildCredentials(mediaUserToken: string, { developerToken: string }) -> Future {
+    if (developerToken != null) {
+      return _assembleCredentials(mediaUserToken, developerToken)
+    }
+    return fetchDeveloperToken().then((devToken) {
+      return _assembleCredentials(mediaUserToken, devToken)
+    })
+  }
+
+  fun _persist(creds: Map) {
+    credentials = creds
+    LocalStorage.setString("credentials", JSON.encode(creds.toJson()))
+  }
+
+  // --- public flows ------------------------------------------------------
+
+  fun login(mediaUserToken: string, { developerToken: string }) -> Future {
+    return _buildCredentials(mediaUserToken, developerToken: developerToken).then((creds) {
+      _persist(creds)
+      controller.add({ type: "login" }.toJson())
+      return creds
+    })
+  }
+
+  fun refreshCredentials() -> Future {
+    if (credentials == null || credentials["mediaUserToken"] == null) {
+      print("[refreshCredentials] No Media-User-Token found. Cannot refresh.")
+      return
+    }
+    return fetchDeveloperToken().then((devToken) {
+      _persist({
+        mediaUserToken: credentials["mediaUserToken"],
+        developerToken: devToken,
+        storefront: credentials["storefront"],
+        expiration: DateTime.now().add(Duration(hours: developerTokenTtlHours)).millisecondsSinceEpoch,
+      })
+      controller.add({ type: "refreshed" }.toJson())
+    })
+  }
+
+  /// Primary flow: sign in through Apple's web player and harvest the
+  /// `media-user-token` cookie.
+  fun authenticate() -> Future {
+    var webview = Webview(uri: "https://music.apple.com/login")
+    var done = false
+
+    var sub: StreamSubscription = webview.onUrlRequestStream.listen((url) {
+      if (done) return
+      if (!url.contains("music.apple.com")) return
+
+      return webview.getCookies(url).then((cookies) {
+        var jsonCookies = cookies.map((cookie) => cookie.toJson()).toList()
+        var match = jsonCookies.where((c) => c["name"] == "media-user-token").toList()
+
+        if (match.isEmpty) return
+        var token = match.first["value"]
+        if (token == null || token == "") return
+
+        done = true
+        return login(token).then(() {
+          return webview.close()
+        })
+      })
+    })
+
+    return webview.open()
+  }
+
+  /// Fallback flow for users who would rather paste tokens manually
+  /// (e.g. copied from Cider's `GET /api/v2/client/tokens`).
+  fun authenticateManually() -> Future {
+    return SpotubeForm.show("Apple Music Login", [
+      {
+        objectType: "text",
+        text: "Paste your Apple Music **Media-User-Token**. You can copy it from the `media-user-token` cookie at music.apple.com, or from Cider's `GET /api/v2/client/tokens`. The developer token is optional — leave it blank to auto-detect.",
+      }.toJson(),
+      {
+        objectType: "input",
+        id: "mediaUserToken",
+        variant: "password",
+        placeholder: "media-user-token",
+        required: true,
+      }.toJson(),
+      {
+        objectType: "input",
+        id: "developerToken",
+        variant: "password",
+        placeholder: "developer token (optional)",
+        required: false,
+      }.toJson(),
+    ]).then((result) {
+      var values = _normalizeFormResult(result)
+      var mediaUserToken = values["mediaUserToken"]
+      if (mediaUserToken == null || mediaUserToken == "") {
+        throw "A Media-User-Token is required to sign in."
+      }
+      var devToken = values["developerToken"]
+      if (devToken == "") devToken = null
+      return login(mediaUserToken, developerToken: devToken)
+    })
+  }
+
+  /// Accept either a `{ id: value }` map or a `[{ id, value }]` list from the
+  /// host form implementation.
+  fun _normalizeFormResult(result) -> Map {
+    if (result == null) return {}.toJson()
+    if (result is List) {
+      var map = {}.toJson()
+      for (var field in result) {
+        if (field != null && field["id"] != null) {
+          map[field["id"]] = field["value"]
+        }
+      }
+      return map
+    }
+    return result
+  }
+
+  fun logout() {
+    credentials = null
+    _timer?.cancel()
+    LocalStorage.remove("credentials")
+    controller.add({ type: "logout" }.toJson())
+  }
+}
+
+export { AppleMusicAuthEndpoint }

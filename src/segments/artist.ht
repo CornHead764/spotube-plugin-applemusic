@@ -1,0 +1,59 @@
+import { AppleMusicApi } from '../api/apple_music_api.ht'
+import { Converters } from '../converter/converter.ht'
+
+class ArtistEndpoint {
+  var client: AppleMusicApi
+
+  construct (this.client)
+
+  fun getArtist(id: string) {
+    return client.getResource("artists", id).then((data) {
+      if (data == null) return null
+      return Converters.fullArtists([data])[0]
+    })
+  }
+
+  fun topTracks(id: string, { limit: int, offset: int }) {
+    return client.getResource("artists", id, views: "top-songs").then((artist) {
+      var top = artist["views"]?["top-songs"]?["data"] ?? []
+      return {
+        total: top.length,
+        limit: limit ?? 20,
+        nextOffset: (offset ?? 0) + (limit ?? 20),
+        hasMore: false,
+        items: Converters.fullTracks(top)
+      }.toJson()
+    })
+  }
+
+  fun albums(id: string, { offset: int, limit: int }) {
+    return client.getRelationship("artists", id, "albums", offset: offset, limit: limit).then((data) {
+      return Converters.paginated(data, offset, limit, (items) => Converters.simpleAlbums(items))
+    })
+  }
+
+  fun related(id: string, { offset: int, limit: int }) {
+    return client.getResource("artists", id, views: "similar-artists").then((artist) {
+      var similar = artist["views"]?["similar-artists"]?["data"] ?? []
+      var artists = Converters.fullArtists(similar)
+      return {
+        total: artists.length,
+        limit: limit ?? 20,
+        nextOffset: (offset ?? 0) + (limit ?? 20),
+        hasMore: false,
+        items: artists
+      }.toJson()
+    })
+  }
+
+  fun save(artistIds: List) async {
+    await client.addToLibrary("artists", artistIds)
+    return true
+  }
+
+  fun unsave(artistIds: List) {
+    return client.removeCatalogFromLibrary("artists", artistIds)
+  }
+}
+
+export { ArtistEndpoint }
