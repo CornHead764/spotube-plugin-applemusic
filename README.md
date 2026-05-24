@@ -26,18 +26,19 @@ scoped to).
 
 ### Authentication
 
-- **`auth.authenticate()`** (the flow Spotube invokes) prompts for your
-  **Media-User-Token** via a form. From that single value the plugin scrapes the
-  shared developer token, resolves the storefront, and persists everything to
-  local storage. This works on every platform, including iOS.
-  - Get the token by signing in at music.apple.com in a browser and copying the
-    `media-user-token` cookie (dev tools → Application → Cookies), or from
-    Cider's `GET /api/v2/client/tokens`.
-- **`auth.authenticateWithWebview()`** is an alternative that signs in through
-  music.apple.com in a webview and harvests the cookie automatically. It works on
-  desktop hosts but **not on mobile** — Spotube's in-app webview lacks the
-  new-window/popup support Apple's ID sign-in requires (on iOS it doesn't open at
-  all), so it isn't wired into Spotube's login button.
+- **`auth.authenticate()`** (the flow Spotube invokes) opens music.apple.com in
+  a webview and harvests the `media-user-token` cookie automatically — no token
+  pasting, same approach as the Spotify plugin. Because Apple's sign-in often
+  completes inside an iframe without a top-level navigation, it both reacts to
+  page loads *and* polls the cookie jar on a timer, so it catches the token
+  regardless of how the sign-in renders. `getCookies` reads the native store, so
+  HttpOnly cookies are picked up too. From that token the plugin scrapes the
+  developer token, resolves the storefront, and persists everything.
+- **`auth.authenticateWithForm()`** is a manual fallback that prompts for the
+  `media-user-token` via a form (works on every platform). It isn't wired into
+  Spotube's UI by default, but can be swapped in if a host's webview can't render
+  Apple's sign-in. Get the token from a browser's cookie inspector
+  (`media-user-token` at music.apple.com) or Cider's `GET /api/v2/client/tokens`.
 
 Credentials are cached in local storage and the developer token is re-scraped on
 a timer (default every 12 h) to self-heal against rotation.

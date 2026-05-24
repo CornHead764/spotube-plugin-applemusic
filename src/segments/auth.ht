@@ -217,14 +217,71 @@ class AppleMusicAuthEndpoint {
 
   /// Primary flow (called by Spotube on every platform).
   ///
-  /// We collect the `media-user-token` through a Spotube form rather than a
-  /// webview. Spotube's in-app webview (`flutter_inappwebview`) has no
-  /// new-window / popup support, which Apple's ID sign-in relies on, so the
-  /// webview flow never completes on mobile (and doesn't even open on iOS).
-  /// Forms work on every platform, and once we have the user token we scrape
-  /// the developer token and resolve the storefront ourselves — so the user
-  /// only has to paste a single value.
+  /// Opens Apple's web player in a webview and harvests the `media-user-token`
+  /// cookie automatically — no token pasting, same idea as the Spotify plugin.
+  ///
+  /// Apple's sign-in frequently completes inside an iframe without a top-level
+  /// navigation, so reacting to page loads alone can miss the moment the token
+  /// appears. We therefore do both: listen to page loads AND poll the cookie
+  /// jar on a short timer; whichever spots the token first wins. `getCookies`
+  /// reads the native cookie store (incl. HttpOnly), so this works even though
+  /// `media-user-token` isn't visible to page JS.
+  ///
+  /// If the in-app webview can't render Apple's sign-in on a given host, swap
+  /// this for `authenticateWithForm()` (one-liner) as a manual-token fallback.
   fun authenticate() -> Future {
+    var webview = Webview(uri: "https://music.apple.com/login")
+    var done = false
+    var pollTimer: Timer
+    var attempts = 0
+
+    // Sign in + tear down the moment the token shows up in the cookie jar.
+    var tryFinish = (cookies) {
+      if (done) return
+      var jsonCookies = cookies.map((cookie) => cookie.toJson()).toList()
+      var match = jsonCookies.where((c) => c["name"] == "media-user-token").toList()
+      if (match.isEmpty) return
+      var token = match.first["value"]
+      if (token == null || token == "") return
+
+      done = true
+      pollTimer?.cancel()
+      return login(token).then(() {
+        return webview.close()
+      })
+    }
+
+    // 1) Page-load signal — covers same-window redirect logins.
+    var sub: StreamSubscription = webview.onUrlRequestStream.listen((url) {
+      if (done) return
+      if (!url.contains("music.apple.com")) return
+      return webview.getCookies(url).then(tryFinish)
+    })
+
+    // 2) Cookie-jar poll — covers iframe/popup logins that never navigate the
+    //    top frame. Gives up after ~5 min so an abandoned login doesn't leak.
+    pollTimer = Timer.periodic(Duration(seconds: 2), (cancel) {
+      if (done) {
+        pollTimer?.cancel()
+        return
+      }
+      attempts = attempts + 1
+      if (attempts > 150) {
+        pollTimer?.cancel()
+        return
+      }
+      webview.getCookies("https://music.apple.com/").then(tryFinish)
+    })
+
+    return webview.open()
+  }
+
+  /// Manual-token fallback: prompt for the `media-user-token` via a Spotube
+  /// form (works on every platform incl. iOS). The plugin still scrapes the
+  /// developer token + storefront, so only one value is needed. Not wired into
+  /// Spotube's UI by default (it only calls `authenticate()`) — swap it in if a
+  /// host's webview can't complete Apple's sign-in.
+  fun authenticateWithForm() -> Future {
     return SpotubeForm.show("Apple Music Login", [
       {
         objectType: "text",
@@ -270,37 +327,6 @@ class AppleMusicAuthEndpoint {
       return map
     }
     return result
-  }
-
-  /// Webview sign-in: open Apple's web player and harvest the
-  /// `media-user-token` cookie. Works on desktop, where the host webview
-  /// supports the popup Apple ID sign-in uses. Not wired into Spotube's UI
-  /// (it only calls `authenticate()`); kept for desktop hosts that drive it
-  /// directly and for reference.
-  fun authenticateWithWebview() -> Future {
-    var webview = Webview(uri: "https://music.apple.com/login")
-    var done = false
-
-    var sub: StreamSubscription = webview.onUrlRequestStream.listen((url) {
-      if (done) return
-      if (!url.contains("music.apple.com")) return
-
-      return webview.getCookies(url).then((cookies) {
-        var jsonCookies = cookies.map((cookie) => cookie.toJson()).toList()
-        var match = jsonCookies.where((c) => c["name"] == "media-user-token").toList()
-
-        if (match.isEmpty) return
-        var token = match.first["value"]
-        if (token == null || token == "") return
-
-        done = true
-        return login(token).then(() {
-          return webview.close()
-        })
-      })
-    })
-
-    return webview.open()
   }
 
   fun logout() {
