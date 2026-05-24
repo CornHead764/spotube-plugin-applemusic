@@ -135,10 +135,6 @@ class _MyHomeState extends State<MyHome> {
                 child: const Text("Login (Webview)"),
               ),
               ElevatedButton(
-                onPressed: () => _run("metadata.auth.authenticateManually()"),
-                child: const Text("Login (Paste token)"),
-              ),
-              ElevatedButton(
                 onPressed: () => _run("metadata.auth.logout()"),
                 child: const Text("Logout"),
               ),

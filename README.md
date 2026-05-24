@@ -26,12 +26,9 @@ scoped to).
 
 ### Authentication
 
-- **`auth.authenticate()`** (primary) opens music.apple.com in a webview, waits
+- **`auth.authenticate()`** opens music.apple.com in a webview, waits
   for the `media-user-token` cookie after sign-in, scrapes the developer token,
   resolves the storefront, and persists everything to local storage.
-- **`auth.authenticateManually()`** (fallback) prompts for a Media-User-Token
-  (and an optional developer token) via a form — handy if you already have a
-  token, e.g. from Cider's `GET /api/v2/client/tokens`.
 
 Credentials are cached in local storage and the developer token is re-scraped on
 a timer (default every 12 h) to self-heal against rotation.
