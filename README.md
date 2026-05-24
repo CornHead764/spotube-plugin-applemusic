@@ -34,11 +34,6 @@ scoped to).
   regardless of how the sign-in renders. `getCookies` reads the native store, so
   HttpOnly cookies are picked up too. From that token the plugin scrapes the
   developer token, resolves the storefront, and persists everything.
-- **`auth.authenticateWithForm()`** is a manual fallback that prompts for the
-  `media-user-token` via a form (works on every platform). It isn't wired into
-  Spotube's UI by default, but can be swapped in if a host's webview can't render
-  Apple's sign-in. Get the token from a browser's cookie inspector
-  (`media-user-token` at music.apple.com) or Cider's `GET /api/v2/client/tokens`.
 
 Credentials are cached in local storage and the developer token is re-scraped on
 a timer (default every 12 h) to self-heal against rotation.
